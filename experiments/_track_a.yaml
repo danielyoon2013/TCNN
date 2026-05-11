@@ -1,0 +1,22 @@
+# Track A sweep manifest (interview-defensibility, ~1 week wall-clock)
+# Lists experiment YAMLs in execution order: cheap CPU baselines first,
+# then GPU TCNN runs. Resumable: re-run this manifest after a crash and
+# the runner skips already-completed cells.
+
+sweep:
+  # Tier 0: CPU-only baselines (rungs 1-3 with literature-standard portfolio)
+  - rung_1_simple_momentum_decile.yaml
+  - rung_2_ewm_momentum_decile.yaml
+  - rung_3_ts_regression_decile.yaml
+
+  # Tier 0d: same factors, dual-softmax portfolio (calibration)
+  - rung_1d_simple_momentum_dual.yaml
+  - rung_2d_ewm_momentum_dual.yaml
+  - rung_3d_ts_regression_dual.yaml
+
+  # Tier 1: TCNN family (GPU)
+  - rung_4_linear_tcnn.yaml
+  - rung_5_tcnn_1ch.yaml
+  - rung_5w_tcnn_1ch_winsor.yaml    # winsorized dual-softmax in training (z-cap 2.5)
+  - rung_6_tcnn_3ch.yaml
+  - rung_6w_tcnn_3ch_winsor.yaml    # winsorized dual-softmax in training (z-cap 2.5)

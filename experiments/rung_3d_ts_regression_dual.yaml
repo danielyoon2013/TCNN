@@ -1,0 +1,26 @@
+# Rung 3d (calibration): TS regression score → dual-softmax portfolio
+# Pairs with rung 3 (decile-sort) to isolate the portfolio-step effect at fixed factor.
+# Critical for the F2 (end-to-end) decomposition: 3d → 4 holds factor linear and
+# only changes the loss/training (MSE → Sharpe end-to-end).
+
+experiment_id: rung_3d_ts_regression_dual
+
+factor:
+  type: ts_reg
+  ridge_alpha: 1.0
+  n_lags: 252
+
+portfolio:
+  type: dual_softmax
+  gross_leverage: 1.0
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 8
+  val_years:   2
+
+output_dir: outputs/rung_3d_ts_regression_dual/

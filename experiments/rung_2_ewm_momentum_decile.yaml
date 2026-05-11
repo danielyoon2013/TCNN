@@ -1,0 +1,23 @@
+# Rung 2: EWM momentum (skip-month, half-life 60d), decile-sort EW long/short
+# Score precomputed in panel as `ewm_h60_skip` (see src/features.add_momentum_factors)
+
+experiment_id: rung_2_ewm_momentum_decile
+
+factor:
+  type: ewm_mom
+
+portfolio:
+  type: decile_sort_ew
+  gross_leverage: 1.0
+  n_deciles: 10
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 0
+  val_years:   0
+
+output_dir: outputs/rung_2_ewm_momentum_decile/

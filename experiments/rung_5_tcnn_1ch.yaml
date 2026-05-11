@@ -1,0 +1,59 @@
+# Rung 5: Full TCNN, 1-channel input (`ret` only). Dual-softmax portfolio.
+# This is the apples-to-apples F3-thesis test: same input as rungs 1-3 (just past returns),
+# but learnable nonlinear aggregation trained end-to-end on Sharpe loss.
+#
+# Resume bullet headline: this rung's Sharpe is the primary number we report.
+#
+# NOTE: TCNN training currently runs via the existing patched train scripts
+# (train/tcnn_attention.py with --in-ch 1). Full integration with the runner is
+# planned for next iteration. For now, run that script directly on RunPod and
+# concat results into outputs/rung_5_tcnn_1ch/.
+
+experiment_id: rung_5_tcnn_1ch
+
+factor:
+  type: tcnn                  # full TCNN (dilated convs + attention pooling)
+  in_ch: 1
+  hidden: 48
+  d: 96
+  kernel_size: 5
+  dilations: [1, 2, 4, 8, 16]
+  dropout: 0.15
+  num_heads: 4                # multi-head attention (paper Appx A: 4 heads)
+
+portfolio:
+  type: dual_softmax          # forced for end-to-end training (differentiable)
+  gross_leverage: 1.0
+
+universe:
+  filters:
+    - in_top_2000
+    - price_above_5
+    - adtv_above_5m
+
+training:
+  loss: sharpe                # train end-to-end on portfolio Sharpe
+  portfolio_for_loss: dual_softmax
+  optimizer: adam
+  lr: 8e-4
+  weight_decay: 0.15
+  max_epochs: 35
+  patience: 10
+  warmup_epochs: 7
+  ma_window: 7
+  batch_size: 15
+  seeds: [0, 1, 2, 3, 4]      # 5-seed ensemble per the locked plan
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 8
+  val_years:   2
+
+# Multi-portfolio eval matrix: at evaluation time, run trained scores through:
+eval_portfolios:
+  - dual_softmax              # paper convention (matches training)
+  - decile_sort_ew            # apples-to-apples with rungs 1, 2, 3
+  - mvo_lw                    # MVO with Ledoit-Wolf shrinkage
+
+output_dir: outputs/rung_5_tcnn_1ch/

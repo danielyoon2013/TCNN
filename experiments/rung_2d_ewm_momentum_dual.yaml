@@ -1,0 +1,21 @@
+# Rung 2d: EWM momentum, dual-softmax portfolio (TCNN's portfolio step at fixed factor)
+
+experiment_id: rung_2d_ewm_momentum_dual
+
+factor:
+  type: ewm_mom
+
+portfolio:
+  type: dual_softmax
+  gross_leverage: 1.0
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 0
+  val_years:   0
+
+output_dir: outputs/rung_2d_ewm_momentum_dual/

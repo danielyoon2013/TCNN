@@ -1,0 +1,53 @@
+# Rung 5w: TCNN 1-channel, trained with WINSORIZED dual-softmax (z-cap = 2.5)
+# Same architecture as rung 5; the only difference is the in-training portfolio mapping.
+# Empirical motivation: raw dual-softmax over-concentrates on heavy-tailed scores
+# (3-stock effective universe for momentum factors with kurtosis ~80). Winsorizing
+# z-scores at +/- 2.5 before softmax restores well-diversified portfolios while
+# remaining fully differentiable (torch.clamp has gradient = 1 inside the cap).
+
+experiment_id: rung_5w_tcnn_1ch_winsor
+
+factor:
+  type: tcnn
+  in_ch: 1
+  hidden: 48
+  d: 96
+  kernel_size: 5
+  dilations: [1, 2, 4, 8, 16]
+  dropout: 0.15
+  num_heads: 4
+
+portfolio:
+  type: dual_softmax_winsor    # eval-side (numpy version, src/portfolio.py)
+  z_cap: 2.5
+  gross_leverage: 1.0
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+training:
+  loss: sharpe
+  portfolio_for_loss: dual_softmax_winsor
+  portfolio_z_cap: 2.5         # KEY: applies torch.clamp(z, -2.5, +2.5) inside training
+  optimizer: adam
+  lr: 8e-4
+  weight_decay: 0.15
+  max_epochs: 35
+  patience: 10
+  warmup_epochs: 7
+  ma_window: 7
+  batch_size: 15
+  seeds: [0, 1, 2, 3, 4]
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 8
+  val_years:   2
+
+eval_portfolios:
+  - dual_softmax_winsor
+  - decile_sort_ew
+  - mvo_lw
+
+output_dir: outputs/rung_5w_tcnn_1ch_winsor/

@@ -1,0 +1,49 @@
+# Rung 6: TCNN with 3 channels — paper config (`ret`, `vol_ewma`, `ret_norm`).
+# Side ablation: 5 → 6 isolates whether engineered channels add anything, controlling
+# for everything else. The 1-channel rung 5 stays the apples-to-apples F3 headline;
+# rung 6 is reported as "and 3-channel adds X."
+
+experiment_id: rung_6_tcnn_3ch
+
+factor:
+  type: tcnn
+  in_ch: 3                   # ret, vol_ewma, ret_norm
+  hidden: 48
+  d: 96
+  kernel_size: 5
+  dilations: [1, 2, 4, 8, 16]
+  dropout: 0.15
+  num_heads: 4               # multi-head additive attention (paper Appx A)
+
+portfolio:
+  type: dual_softmax
+  gross_leverage: 1.0
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+training:
+  loss: sharpe
+  portfolio_for_loss: dual_softmax
+  optimizer: adam
+  lr: 8e-4
+  weight_decay: 0.15
+  max_epochs: 35
+  patience: 10
+  warmup_epochs: 7
+  ma_window: 7
+  batch_size: 15
+  seeds: [0, 1, 2, 3, 4]
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 8
+  val_years:   2
+
+eval_portfolios:
+  - dual_softmax
+  - decile_sort_ew
+  - mvo_lw
+
+output_dir: outputs/rung_6_tcnn_3ch/

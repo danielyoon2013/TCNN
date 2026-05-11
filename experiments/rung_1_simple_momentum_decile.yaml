@@ -1,0 +1,29 @@
+# Rung 1: 12-1 momentum, decile-sort EW long/short
+# The literature baseline. No training. Score is precomputed in panel as `mom_12_1`.
+
+experiment_id: rung_1_simple_momentum_decile
+
+factor:
+  type: simple_mom            # → src.factors.score_simple_momentum
+  # No training required for hand-crafted factors
+
+portfolio:
+  type: decile_sort_ew        # → src.portfolio.decile_sort_ew
+  gross_leverage: 1.0
+  n_deciles: 10
+
+universe:
+  filters:
+    - in_top_2000
+    - price_above_5
+    - adtv_above_5m
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 0              # not used for hand-crafted factors
+  val_years:   0
+
+# No training section needed — hand-crafted factor
+
+output_dir: outputs/rung_1_simple_momentum_decile/

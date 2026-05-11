@@ -1,0 +1,46 @@
+# Rung 4: Linear TCNN — single Conv1d(in_ch=1, out=1, kernel=252, bias=False), no activation.
+# Mathematically equivalent to learning a linear weight vector w of length 252,
+# but trained END-TO-END on the portfolio Sharpe loss (vs rung 3 which trains via
+# OLS on next-month return MSE). The 3d → 4 gap isolates the value of training
+# against the portfolio objective at fixed (linear) function class.
+
+experiment_id: rung_4_linear_tcnn
+
+factor:
+  type: linear_tcnn
+  in_ch: 1
+  lookback: 252
+  # No hidden/d/dilations/dropout/num_heads — those don't apply to the linear variant
+
+portfolio:
+  type: dual_softmax
+  gross_leverage: 1.0
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+training:
+  loss: sharpe
+  portfolio_for_loss: dual_softmax
+  optimizer: adam
+  lr: 8e-4
+  weight_decay: 0.15
+  max_epochs: 35
+  patience: 10
+  warmup_epochs: 7
+  ma_window: 7
+  batch_size: 15
+  seeds: [0, 1, 2, 3, 4]
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 8
+  val_years:   2
+
+eval_portfolios:
+  - dual_softmax
+  - decile_sort_ew
+  - mvo_lw
+
+output_dir: outputs/rung_4_linear_tcnn/

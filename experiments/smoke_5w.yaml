@@ -1,0 +1,48 @@
+# Smoke test for rung_5w (winsor TCNN) — single year, 2 epochs, 1 seed.
+# Verifies the winsorized-dual-softmax training path runs end-to-end on CPU.
+# Discard outputs after; this is a sanity check, not a real run.
+
+experiment_id: smoke_5w
+
+factor:
+  type: tcnn
+  in_ch: 1
+  hidden: 16                  # smaller for speed
+  d: 32
+  kernel_size: 5
+  dilations: [1, 2, 4]        # fewer layers
+  dropout: 0.15
+  num_heads: 2
+
+portfolio:
+  type: dual_softmax_winsor
+  z_cap: 2.5
+  gross_leverage: 1.0
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+training:
+  loss: sharpe
+  portfolio_for_loss: dual_softmax_winsor
+  portfolio_z_cap: 2.5
+  optimizer: adam
+  lr: 8e-4
+  weight_decay: 0.15
+  max_epochs: 2               # smoke: just verify the pipeline runs
+  patience: 1
+  warmup_epochs: 0
+  ma_window: 1
+  batch_size: 8
+  seeds: [0]                  # single seed
+
+rolling:
+  start_year: 2022
+  end_year:   2022            # single year
+  train_years: 4              # smaller training window for speed
+  val_years: 1
+
+eval_portfolios:
+  - dual_softmax_winsor
+
+output_dir: outputs/smoke_5w/

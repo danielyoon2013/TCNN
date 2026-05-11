@@ -1,0 +1,29 @@
+# Rung 3: Time-series regression on 252 lag returns, pooled OLS with ridge.
+# Decile-sort EW portfolio (literature standard).
+# This rung tests "does learning the weights from data beat hand-crafted weights?"
+
+experiment_id: rung_3_ts_regression_decile
+
+factor:
+  type: ts_reg                # → src.factors.score_ts_regression (with pooled-OLS beta)
+  ridge_alpha: 1.0            # L2 regularization strength
+  n_lags: 252                 # full lookback (matches TCNN's input size)
+
+portfolio:
+  type: decile_sort_ew
+  gross_leverage: 1.0
+  n_deciles: 10
+
+universe:
+  filters:
+    - in_top_2000
+    - price_above_5
+    - adtv_above_5m
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 8              # 8 years of training data per fold
+  val_years:   2              # 2 years of validation (for hyper-tuning, if any)
+
+output_dir: outputs/rung_3_ts_regression_decile/
