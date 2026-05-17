@@ -356,7 +356,10 @@ def train_one_year(cfg: dict, panels: panels_mod.TCNNPanels, year: int, seed: in
     best_hs = {k: v.cpu().clone() for k, v in head.state_dict().items()}
     history = {"train_sharpe": [], "val_sharpe": [], "val_ma": []}
 
+    import time as _time
+    _epoch_t0 = _time.time()
     for epoch in range(max_epochs):
+        _t_start = _time.time()
         ep_rets, _ = train_one_epoch(encoder, head, train_ds, opt, batch_size, device, z_cap=z_cap)
         train_sr = (np.mean(ep_rets) / (np.std(ep_rets) + 1e-8) * np.sqrt(252)) if ep_rets else 0.0
         history["train_sharpe"].append(float(train_sr))
@@ -373,15 +376,28 @@ def train_one_year(cfg: dict, panels: panels_mod.TCNNPanels, year: int, seed: in
         history["val_ma"].append(ma)
         scheduler.step(ma)
 
+        status = ""
         if epoch >= warmup:
             if ma > best_val_ma:
                 best_val_ma = ma; best_epoch = epoch; no_imp = 0
                 best_es = {k: v.cpu().clone() for k, v in encoder.state_dict().items()}
                 best_hs = {k: v.cpu().clone() for k, v in head.state_dict().items()}
+                status = "best"
             else:
                 no_imp += 1
-                if no_imp >= patience:
-                    break
+                status = f"no-imp {no_imp}/{patience}"
+        else:
+            status = f"warmup {epoch + 1}/{warmup}"
+
+        # Per-epoch progress line — flushed immediately so tmux/log shows it live
+        elapsed = _time.time() - _t_start
+        print(f"    epoch {epoch + 1:>2}/{max_epochs}  "
+              f"train_sr={train_sr:+.3f}  val_sr={val_sr:+.3f}  val_ma={ma:+.3f}  "
+              f"lr={opt.param_groups[0]['lr']:.2e}  {elapsed:>4.1f}s  {status}",
+              flush=True)
+
+        if epoch >= warmup and no_imp >= patience:
+            break
 
     if best_epoch >= warmup:
         encoder.load_state_dict({k: v.to(device) for k, v in best_es.items()})
