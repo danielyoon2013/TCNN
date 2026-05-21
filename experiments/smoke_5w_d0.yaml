@@ -1,0 +1,48 @@
+# Dropout-zero variant of smoke_5w — used ONLY for the vectorize regression check.
+# With dropout=0, batched and non-batched code paths must be bit-identical.
+# Discard after the regression check; this file is not part of the sweep.
+
+experiment_id: smoke_5w_d0
+
+factor:
+  type: tcnn
+  in_ch: 1
+  hidden: 16
+  d: 32
+  kernel_size: 5
+  dilations: [1, 2, 4]
+  dropout: 0.0                # KEY: zero dropout for strict bit-identity test
+  num_heads: 2
+
+portfolio:
+  type: dual_softmax_winsor
+  z_cap: 2.5
+  gross_leverage: 1.0
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+training:
+  loss: sharpe
+  portfolio_for_loss: dual_softmax_winsor
+  portfolio_z_cap: 2.5
+  optimizer: adam
+  lr: 8e-4
+  weight_decay: 0.15
+  max_epochs: 2
+  patience: 1
+  warmup_epochs: 0
+  ma_window: 1
+  batch_size: 8
+  seeds: [0]
+
+rolling:
+  start_year: 2022
+  end_year:   2022
+  train_years: 4
+  val_years: 1
+
+eval_portfolios:
+  - dual_softmax_winsor
+
+output_dir: outputs/smoke_5w_d0/

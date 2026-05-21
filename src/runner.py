@@ -411,7 +411,7 @@ def concat_to_master(cfg: dict) -> None:
     if dfs:
         master = pd.concat(dfs, ignore_index=True).sort_values(["year", "seed", "date"])
         master.to_csv(output_dir / "all_results.csv", index=False)
-        print(f"  → {output_dir / 'all_results.csv'} ({len(master):,} rows)")
+        print(f"  -> {output_dir / 'all_results.csv'} ({len(master):,} rows)")
 
 
 # =============================================================================

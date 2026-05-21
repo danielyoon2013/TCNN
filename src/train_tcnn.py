@@ -116,43 +116,85 @@ class TCNEncoder(nn.Module):
 
 # =============================================================================
 # Sharpe loss + portfolio-return computation (with weight drift, BUG-8 cash pad)
+#
+# Batched versions: operate on K months in one shot via (K, N_max) padding +
+# stock_mask. Removes per-month Python-loop GPU dispatch overhead. Mathematically
+# equivalent to a per-month loop in eval mode; differs only in dropout RNG
+# advance order during training (see scripts/regression_check_vectorized.py).
 # =============================================================================
 
-def two_softmax_weights(u: torch.Tensor, gross_leverage: float = 1.0,
-                         z_cap: float | None = None, eps: float = 1e-6) -> torch.Tensor:
-    """Cross-sectional z-score → (optional winsor clip) → dual-softmax → dollar-neutral L/S.
+def two_softmax_weights_batched(u: torch.Tensor, stock_mask: torch.Tensor,
+                                  gross_leverage: float = 1.0,
+                                  z_cap: float | None = None,
+                                  eps: float = 1e-6) -> torch.Tensor:
+    """Batched cross-sectional z-score → (optional winsor) → dual-softmax → L/S weights.
 
-    `z_cap` (None or positive float):
-      - None  : raw dual-softmax (paper config). Concentrates heavily on fat-tailed scores.
-      - 2.5   : winsorize z-scores to [-2.5, +2.5] before softmax. `torch.clamp` is
-                differentiable (gradient = 1 inside, 0 at endpoints), so this is a
-                drop-in replacement that prevents the 3-stock concentration we
-                empirically observed for hand-crafted momentum factors.
+    Args:
+        u:          (K, N_max) raw scores per (month, stock); padded entries arbitrary
+        stock_mask: (K, N_max) bool, True for valid stocks in that month
+        z_cap:      None (raw dual-softmax, paper config) or 2.5 (winsorized; rungs 5w/6w)
+
+    Returns:
+        w: (K, N_max) portfolio weights; padded entries == 0; |w_k|.sum() = gross_leverage.
     """
-    u = u - u.mean()
-    u = u / (u.std(unbiased=False) + eps)
+    mask_f = stock_mask.float()
+    n_valid = mask_f.sum(dim=1, keepdim=True).clamp(min=1.0)  # (K, 1)
+
+    # Cross-sectional z-score over VALID stocks only (population std, like unbiased=False)
+    u_sum = (u * mask_f).sum(dim=1, keepdim=True)
+    u_mean = u_sum / n_valid
+    u_centered = (u - u_mean) * mask_f                         # invalid → 0
+    u_var = (u_centered ** 2).sum(dim=1, keepdim=True) / n_valid
+    u_std = u_var.sqrt() + eps
+    z = (u - u_mean) / u_std
+
     if z_cap is not None:
-        u = torch.clamp(u, -z_cap, z_cap)
-    long  = F.softmax(u, dim=0)
-    short = F.softmax(-u, dim=0)
-    w = long - short
-    w = w - w.mean()
-    w = w * (gross_leverage / (w.abs().sum() + 1e-12))
+        z = torch.clamp(z, -z_cap, z_cap)
+
+    # Mask invalid to -inf so softmax assigns them weight 0.
+    # For short = softmax(-z), we mask (-z) to -inf instead of z to +inf — equivalent
+    # but avoids the +inf/clamp interaction.
+    NEG = torch.finfo(z.dtype).min / 2
+    long_logits  = z.masked_fill(~stock_mask, NEG)
+    short_logits = (-z).masked_fill(~stock_mask, NEG)
+    long  = F.softmax(long_logits,  dim=1)
+    short = F.softmax(short_logits, dim=1)
+    w = long - short                                            # invalid entries: 0
+
+    # Dollar-neutral: subtract mean over valid stocks, then re-mask invalid to 0
+    w_mean = w.sum(dim=1, keepdim=True) / n_valid               # invalid contributes 0 already
+    w = (w - w_mean) * mask_f                                   # re-zero invalid
+    gross = w.abs().sum(dim=1, keepdim=True) + 1e-12
+    w = w * (gross_leverage / gross)
     return w
 
 
-def portfolio_returns_drift(w_initial: torch.Tensor, daily_rets: torch.Tensor) -> torch.Tensor:
-    """BUG-8: NaN returns (delisted stocks past their last day) treated as 0 (cash)."""
-    H = daily_rets.shape[0]
+def portfolio_returns_drift_batched(w_initial: torch.Tensor,
+                                      daily_rets: torch.Tensor,
+                                      hold_lens: torch.Tensor) -> torch.Tensor:
+    """Batched daily portfolio returns with weight drift; BUG-8 NaN-as-cash.
+
+    Args:
+        w_initial: (K, N_max) entry weights from two_softmax_weights_batched
+        daily_rets: (K, H_max, N_max) per-day asset returns; NaN → cash (return 0)
+        hold_lens:  (K,) actual holding days per month (≤ H_max)
+
+    Returns:
+        port_rets: (K, H_max) daily portfolio P&L. Entries with day >= hold_lens[k]
+                   are computed but should be masked out by the caller via
+                   `day_mask = arange(H_max) < hold_lens.unsqueeze(1)`.
+    """
+    H_max = daily_rets.shape[1]
+    w = w_initial                                               # (K, N_max)
     out = []
-    w = w_initial
-    for t in range(H):
-        r = daily_rets[t]
-        r = torch.where(torch.isnan(r), torch.zeros_like(r), r)
-        port_ret = (w * r).sum()
+    for t in range(H_max):
+        r_t = daily_rets[:, t, :]                               # (K, N_max)
+        r_t = torch.where(torch.isnan(r_t), torch.zeros_like(r_t), r_t)
+        port_ret = (w * r_t).sum(dim=1)                         # (K,)
         out.append(port_ret)
-        w = w * (1 + r) / (1 + port_ret + 1e-8)
-    return torch.stack(out)
+        # Weight drift: w_{t+1} = w_t (1 + r_t) / (1 + port_ret_t)
+        w = w * (1 + r_t) / (1 + port_ret.unsqueeze(1) + 1e-8)
+    return torch.stack(out, dim=1)                              # (K, H_max)
 
 
 # =============================================================================
@@ -209,12 +251,51 @@ class FoldDataset:
     def __len__(self):
         return len(self.X)
 
-    def get_month_data(self, idx):
-        m = self.mask[idx]
-        H = self.holding_days[idx]
-        X_t = torch.tensor(np.array(self.X[idx, m]), dtype=torch.float32)
-        Y_t = torch.tensor(np.array(self.Y[idx, m, :H]), dtype=torch.float32).T  # (H, N)
-        return X_t, Y_t, self.rebal_dates[idx], int(H)
+    def get_month_batch(self, idxs):
+        """Stack K months into padded batch tensors.
+
+        Args:
+            idxs: list of K month indices into this fold.
+
+        Returns:
+            X_batch:    (K, N_max, F, L) float32 — past returns; zero-padded for invalid
+            Y_batch:    (K, H_max, N_max) float32 — daily forward returns; NaN-padded
+            stock_mask: (K, N_max) bool — True for valid stocks per month
+            hold_lens:  (K,) int64 — actual holding days per month (≤ H_max)
+            dates:      list[K] of pd.Timestamp — rebal dates
+        """
+        K = len(idxs)
+        if K == 0:
+            raise ValueError("empty batch")
+
+        masks_per = [self.mask[i] for i in idxs]
+        n_valids  = [int(m.sum()) for m in masks_per]
+        N_max     = max(n_valids)
+        H_max     = int(max(self.holding_days[i] for i in idxs))
+        F_dim     = self.X.shape[2]
+        L_dim     = self.X.shape[3]
+
+        X_batch    = np.zeros((K, N_max, F_dim, L_dim), dtype=np.float32)
+        Y_batch    = np.full((K, H_max, N_max), np.nan, dtype=np.float32)
+        stock_mask = np.zeros((K, N_max), dtype=bool)
+        hold_lens  = np.zeros(K, dtype=np.int64)
+        dates      = []
+
+        for k, idx in enumerate(idxs):
+            m = masks_per[k]
+            n_v = n_valids[k]
+            h = int(self.holding_days[idx])
+            X_batch[k, :n_v]       = np.asarray(self.X[idx, m])           # (n_v, F, L)
+            Y_batch[k, :h, :n_v]   = np.asarray(self.Y[idx, m, :h]).T     # (h, n_v)
+            stock_mask[k, :n_v]    = True
+            hold_lens[k]           = h
+            dates.append(self.rebal_dates[idx])
+
+        return (torch.from_numpy(X_batch),
+                torch.from_numpy(Y_batch),
+                torch.from_numpy(stock_mask),
+                torch.from_numpy(hold_lens),
+                dates)
 
 
 def find_fold_indices(rebal_dates, train_start, train_end, val_start, val_end, test_year):
@@ -236,6 +317,23 @@ def find_fold_indices(rebal_dates, train_start, train_end, val_start, val_end, t
 # Training / evaluation
 # =============================================================================
 
+def _encode_batched(encoder, head, X_batch: torch.Tensor) -> torch.Tensor:
+    """Flatten K and N_max, run encoder once, reshape back. Returns scores (K, N_max).
+
+    Encoder operates per-sample (Conv1d, GroupNorm, Dropout, attention softmax over
+    the L axis) so concatenating along the leading dim is mathematically identical
+    to K separate passes — modulo dropout RNG draw order during training.
+    """
+    K, N_max, F_dim, L_dim = X_batch.shape
+    X_flat = X_batch.reshape(K * N_max, F_dim, L_dim)
+    h = encoder(X_flat)
+    if h.dim() > 1:
+        u_flat = head(h).squeeze(-1)                            # (K*N_max,)
+    else:
+        u_flat = h                                              # linear case
+    return u_flat.reshape(K, N_max)
+
+
 def train_one_epoch(encoder, head, dataset, opt, batch_size, device,
                      max_grad_norm=1.0, z_cap: float | None = None):
     encoder.train(); head.train()
@@ -247,19 +345,21 @@ def train_one_epoch(encoder, head, dataset, opt, batch_size, device,
     indices = indices[:n_full * batch_size]
     epoch_returns, grad_norms = [], []
     for batch_idx in range(n_full):
-        batch_returns = []
-        for idx in range(batch_idx * batch_size, (batch_idx + 1) * batch_size):
-            X_t, Y_t, _, _ = dataset.get_month_data(indices[idx])
-            X_t = X_t.to(device); Y_t = Y_t.to(device)
-            h = encoder(X_t)
-            if h.dim() > 1:
-                u = head(h).squeeze(-1)
-            else:
-                u = h  # linear case: encoder already outputs (N,)
-            w = two_softmax_weights(u, gross_leverage=1.0, z_cap=z_cap)
-            batch_returns.append(portfolio_returns_drift(w, Y_t))
-        batch_rets = torch.cat(batch_returns)
+        idxs = indices[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+        X_batch, Y_batch, stock_mask, hold_lens, _ = dataset.get_month_batch(idxs)
+        X_batch = X_batch.to(device); Y_batch = Y_batch.to(device)
+        stock_mask = stock_mask.to(device); hold_lens = hold_lens.to(device)
+
+        u = _encode_batched(encoder, head, X_batch)             # (K, N_max)
+        w = two_softmax_weights_batched(u, stock_mask, gross_leverage=1.0, z_cap=z_cap)
+        port_rets = portfolio_returns_drift_batched(w, Y_batch, hold_lens)  # (K, H_max)
+
+        # Concat valid days across months → flat 1-D stream for Sharpe loss
+        H_max = port_rets.shape[1]
+        day_mask = torch.arange(H_max, device=device).unsqueeze(0) < hold_lens.unsqueeze(1)
+        batch_rets = port_rets[day_mask]                        # (sum(hold_lens),)
         batch_rets = torch.clamp(batch_rets, -config.DAILY_RET_CLIP, config.DAILY_RET_CLIP)
+
         mu = batch_rets.mean()
         sd = torch.clamp(batch_rets.std(unbiased=False), min=1e-4, max=1.0)
         sharpe = torch.clamp(mu / sd * np.sqrt(config.TRADING_DAYS_PER_YEAR), -5.0, 5.0)
@@ -268,28 +368,43 @@ def train_one_epoch(encoder, head, dataset, opt, batch_size, device,
         gn = torch.nn.utils.clip_grad_norm_(
             list(encoder.parameters()) + list(head.parameters()),
             max_norm=max_grad_norm)
-        grad_norms.append(float(gn))
-        if torch.isnan(torch.tensor(gn)) or float(gn) > 500.0:
+        gn_val = float(gn)
+        grad_norms.append(gn_val)
+        if not np.isfinite(gn_val) or gn_val > 500.0:
             opt.zero_grad(); continue
         opt.step()
-        epoch_returns.extend([float(r) for r in batch_rets.cpu()])
+        epoch_returns.extend(batch_rets.detach().cpu().tolist())
     return epoch_returns, grad_norms
 
 
 @torch.no_grad()
-def evaluate_one(encoder, head, dataset, device, z_cap: float | None = None):
+def evaluate_one(encoder, head, dataset, device, z_cap: float | None = None,
+                  batch_size: int = 16):
+    """Forward-only eval. Batched across months for speed; bit-identical to
+    per-month eval since dropout/BN are disabled by encoder.eval()."""
     encoder.eval(); head.eval()
     results = []
-    for t in range(len(dataset)):
-        X_t, Y_t, rebal_date, H = dataset.get_month_data(t)
-        X_t = X_t.to(device); Y_t = Y_t.to(device)
-        h = encoder(X_t)
-        u = head(h).squeeze(-1) if h.dim() > 1 else h
-        w = two_softmax_weights(u, z_cap=z_cap)
-        port_rets = portfolio_returns_drift(w, Y_t)
-        for di, ret in enumerate(port_rets.cpu().numpy()):
-            results.append({"date": rebal_date + pd.Timedelta(days=di + 1),
-                            "return": float(ret), "rebal_date": rebal_date})
+    n = len(dataset)
+    for start in range(0, n, batch_size):
+        idxs = list(range(start, min(start + batch_size, n)))
+        X_batch, Y_batch, stock_mask, hold_lens, dates_batch = dataset.get_month_batch(idxs)
+        X_batch = X_batch.to(device); Y_batch = Y_batch.to(device)
+        stock_mask = stock_mask.to(device); hold_lens = hold_lens.to(device)
+
+        u = _encode_batched(encoder, head, X_batch)             # (K, N_max)
+        w = two_softmax_weights_batched(u, stock_mask, z_cap=z_cap)
+        port_rets = portfolio_returns_drift_batched(w, Y_batch, hold_lens)  # (K, H_max)
+
+        port_rets_cpu = port_rets.cpu().numpy()
+        hold_lens_cpu = hold_lens.cpu().numpy()
+        for k, rebal_date in enumerate(dates_batch):
+            H = int(hold_lens_cpu[k])
+            for di in range(H):
+                results.append({
+                    "date": rebal_date + pd.Timedelta(days=di + 1),
+                    "return": float(port_rets_cpu[k, di]),
+                    "rebal_date": rebal_date,
+                })
     return results
 
 

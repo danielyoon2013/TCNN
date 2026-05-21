@@ -348,7 +348,7 @@ nb_04 = make_nb([
         "\n",
         "import pandas as pd, numpy as np, torch\n",
         "from src import config, panels, portfolio, train_tcnn, eval as evalmod\n",
-        "from src.train_tcnn import TCNEncoder, two_softmax_weights\n",
+        "from src.train_tcnn import TCNEncoder, two_softmax_weights_batched\n",
     ]),
     md([
         "## 1. Loop over trained TCNN checkpoints, score each rebal date, evaluate under 3 portfolios\n",
