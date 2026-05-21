@@ -4,6 +4,8 @@ numpy>=1.24
 pandas>=2.0
 pyarrow>=14.0
 scipy>=1.10
+scikit-learn>=1.3      # Ridge (rung_3 ts_regression, factors.py), LedoitWolf (mvo_lw portfolio)
+statsmodels>=0.14      # FF5+UMD neutrality regression in eval.py (Phase D)
 
 # Plotting
 matplotlib>=3.7
