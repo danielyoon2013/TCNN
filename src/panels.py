@@ -53,7 +53,9 @@ def panel_to_dense_3d(panel: pd.DataFrame, feature_cols: list[str]) -> tuple[np.
 
     di = panel["date"].map(date_idx).values
     pi = panel["permno"].map(permno_idx).values
-    dense[di, pi, :] = panel[feature_cols].values.astype(np.float32)
+    # .to_numpy handles pandas nullable dtypes (Float64/Int64) by converting pd.NA → np.nan;
+    # .values.astype(np.float32) would TypeError on pd.NA in nullable columns (e.g. vol_ewma).
+    dense[di, pi, :] = panel[feature_cols].to_numpy(dtype=np.float32, na_value=np.nan)
 
     return dense, dates, permnos
 
