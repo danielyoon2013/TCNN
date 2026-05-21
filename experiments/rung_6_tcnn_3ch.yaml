@@ -33,7 +33,7 @@ training:
   warmup_epochs: 7
   ma_window: 7
   batch_size: 15
-  seeds: [0, 1, 2, 3, 4]
+  seeds: [0]                   # single seed for fast turnaround; add [1,2,3,4] later for ensemble
 
 rolling:
   start_year: 2010
