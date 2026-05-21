@@ -31,7 +31,16 @@ from . import portfolio as portfolio_mod
 # Determinism
 # =============================================================================
 
-def seed_everything(seed: int = 0, deterministic: bool = True):
+def seed_everything(seed: int = 0, deterministic: bool = False):
+    """Seed all RNGs. Default uses cuDNN benchmark mode for ~50-100x speedup
+    on full TCNN (5 dilated convs + attention + multi-head). Bit-identity
+    within a single seed is sacrificed; sweep-level reproducibility comes
+    from the 5-seed ensemble.
+
+    Set deterministic=True to force bit-reproducible behavior (much slower
+    for conv-heavy networks; also requires CUBLAS_WORKSPACE_CONFIG=:4096:8
+    on CUDA>=10.2 to suppress runtime warnings).
+    """
     import random
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
@@ -42,6 +51,8 @@ def seed_everything(seed: int = 0, deterministic: bool = True):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True, warn_only=True)
+    else:
+        torch.backends.cudnn.benchmark = True       # auto-pick fastest conv kernel per shape
 
 
 # =============================================================================
