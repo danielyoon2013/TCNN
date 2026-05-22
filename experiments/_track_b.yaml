@@ -1,0 +1,7 @@
+# Track B sweep manifest — listwise-ranking-loss ablation
+# Single experiment for now: rung_7 = same architecture as rung_6w with ApproxNDCG loss.
+# Separate from Track A (which is complete) so we don't accidentally re-run the
+# whole 11-rung sweep.
+
+sweep:
+  - rung_7_tcnn_3ch_listwise.yaml

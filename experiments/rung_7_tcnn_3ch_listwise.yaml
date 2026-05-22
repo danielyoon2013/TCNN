@@ -1,0 +1,64 @@
+# Rung 7: 3-channel TCNN — same architecture as rung_6w, but trained with
+# symmetric ApproxNDCG@K listwise ranking loss instead of negative-Sharpe loss.
+#
+# Motivation: cross-paper consensus (Poh-Lim-Zohren-Roberts 2020, Wang 2021,
+# 2025 LTR-on-stocks evaluations) consistently reports +30% to +3x Sharpe lift
+# from switching pointwise/Sharpe-style loss to listwise ranking loss. Phase D
+# diagnostics on rung_6w showed the strategy is factor-orthogonal (β_umd ≈ 0,
+# R² < 1%) but the absolute alpha magnitude (1.35% ann) is small enough that
+# α t-stat is 1.50 (marginal). Higher-quality ranking should extract more
+# signal from the same input.
+#
+# This is a pure loss-function ablation: identical architecture, identical
+# inputs, identical eval-time portfolio (dual-softmax-winsor z_cap=2.5).
+# Whatever Sharpe lift we see is attributable to the loss change.
+
+experiment_id: rung_7_tcnn_3ch_listwise
+
+factor:
+  type: tcnn
+  in_ch: 3                       # ret, vol_ewma, ret_norm (same as rung_6w)
+  hidden: 48
+  d: 96
+  kernel_size: 5
+  dilations: [1, 2, 4, 8, 16]
+  dropout: 0.15
+  num_heads: 4
+
+portfolio:
+  type: dual_softmax_winsor       # eval-time portfolio (same as rung_6w)
+  z_cap: 2.5
+  gross_leverage: 1.0
+
+universe:
+  filters: [in_top_2000, price_above_5, adtv_above_5m]
+
+training:
+  loss: approx_ndcg               # KEY: listwise ranking loss (was: sharpe)
+  loss_k_top: 50                  # top-50 long sleeve (~2.5% of 2000-stock universe)
+  loss_k_bot: 50                  # bottom-50 short sleeve
+  loss_temperature: 10.0          # sigmoid sharpness for soft-rank on z-scored values
+  portfolio_for_loss: dual_softmax_winsor  # used at eval, NOT in training loss
+  portfolio_z_cap: 2.5            # ditto
+  optimizer: adam
+  lr: 8e-4
+  weight_decay: 0.15
+  max_epochs: 35
+  patience: 10
+  warmup_epochs: 7
+  ma_window: 7
+  batch_size: 15
+  seeds: [0]                      # single seed for fast turnaround; add [1,2,3,4] if rung_7 lifts
+
+rolling:
+  start_year: 2010
+  end_year:   2023
+  train_years: 8
+  val_years:   2
+
+eval_portfolios:
+  - dual_softmax_winsor
+  - decile_sort_ew
+  - mvo_lw
+
+output_dir: outputs/rung_7_tcnn_3ch_listwise/

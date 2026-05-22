@@ -346,7 +346,23 @@ def _encode_batched(encoder, head, X_batch: torch.Tensor) -> torch.Tensor:
 
 
 def train_one_epoch(encoder, head, dataset, opt, batch_size, device,
-                     max_grad_norm=1.0, z_cap: float | None = None):
+                     max_grad_norm=1.0, z_cap: float | None = None,
+                     loss_fn: str = "sharpe",
+                     loss_k_top: int = 50, loss_k_bot: int = 50,
+                     loss_temperature: float = 10.0):
+    """One training epoch.
+
+    `loss_fn`:
+      - "sharpe"      : negative Sharpe over the concatenated daily portfolio P&L
+                        stream (original Moody-Saffell-style, default).
+      - "approx_ndcg" : symmetric ApproxNDCG@K listwise ranking loss on
+                        (scores, cumulative-21d-return). Per-month NDCG averaged
+                        across batch; portfolio map only applied at eval time.
+
+    For both losses, `epoch_returns` is the dual-softmax-winsor portfolio's daily
+    P&L stream (computed without gradient when loss_fn != "sharpe") so the
+    `train_sr` log line stays comparable across loss variants.
+    """
     encoder.train(); head.train()
     n = len(dataset)
     if n == 0: return [], []
@@ -362,19 +378,38 @@ def train_one_epoch(encoder, head, dataset, opt, batch_size, device,
         stock_mask = stock_mask.to(device); hold_lens = hold_lens.to(device)
 
         u = _encode_batched(encoder, head, X_batch)             # (K, N_max)
-        w = two_softmax_weights_batched(u, stock_mask, gross_leverage=1.0, z_cap=z_cap)
-        port_rets = portfolio_returns_drift_batched(w, Y_batch, hold_lens)  # (K, H_max)
 
-        # Concat valid days across months → flat 1-D stream for Sharpe loss
-        H_max = port_rets.shape[1]
-        day_mask = torch.arange(H_max, device=device).unsqueeze(0) < hold_lens.unsqueeze(1)
-        batch_rets = port_rets[day_mask]                        # (sum(hold_lens),)
-        batch_rets = torch.clamp(batch_rets, -config.DAILY_RET_CLIP, config.DAILY_RET_CLIP)
+        if loss_fn == "sharpe":
+            w = two_softmax_weights_batched(u, stock_mask, gross_leverage=1.0, z_cap=z_cap)
+            port_rets = portfolio_returns_drift_batched(w, Y_batch, hold_lens)  # (K, H_max)
+            H_max = port_rets.shape[1]
+            day_mask = torch.arange(H_max, device=device).unsqueeze(0) < hold_lens.unsqueeze(1)
+            batch_rets = port_rets[day_mask]                    # (sum(hold_lens),)
+            batch_rets = torch.clamp(batch_rets, -config.DAILY_RET_CLIP, config.DAILY_RET_CLIP)
+            mu = batch_rets.mean()
+            sd = torch.clamp(batch_rets.std(unbiased=False), min=1e-4, max=1.0)
+            sharpe = torch.clamp(mu / sd * np.sqrt(config.TRADING_DAYS_PER_YEAR), -5.0, 5.0)
+            loss = -sharpe
+            log_rets = batch_rets.detach()
+        elif loss_fn == "approx_ndcg":
+            from .losses import approx_ndcg_loss_batched
+            # 21-day cumulative forward return per stock; treat NaN (delisted) as 0.
+            Y_clean = torch.where(torch.isnan(Y_batch), torch.zeros_like(Y_batch), Y_batch)
+            fwd_rets = Y_clean.sum(dim=1)                       # (K, N_max)
+            loss = approx_ndcg_loss_batched(u, fwd_rets, stock_mask,
+                                             k_top=loss_k_top, k_bot=loss_k_bot,
+                                             alpha=loss_temperature)
+            # Log dual-softmax-winsor portfolio Sharpe for monitoring (no gradient through this).
+            with torch.no_grad():
+                w_log = two_softmax_weights_batched(u, stock_mask, gross_leverage=1.0, z_cap=z_cap)
+                port_rets_log = portfolio_returns_drift_batched(w_log, Y_batch, hold_lens)
+                H_max = port_rets_log.shape[1]
+                day_mask = torch.arange(H_max, device=device).unsqueeze(0) < hold_lens.unsqueeze(1)
+                log_rets = torch.clamp(port_rets_log[day_mask],
+                                       -config.DAILY_RET_CLIP, config.DAILY_RET_CLIP)
+        else:
+            raise ValueError(f"Unknown loss_fn: {loss_fn!r} (expected 'sharpe' or 'approx_ndcg')")
 
-        mu = batch_rets.mean()
-        sd = torch.clamp(batch_rets.std(unbiased=False), min=1e-4, max=1.0)
-        sharpe = torch.clamp(mu / sd * np.sqrt(config.TRADING_DAYS_PER_YEAR), -5.0, 5.0)
-        loss = -sharpe
         opt.zero_grad(); loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(
             list(encoder.parameters()) + list(head.parameters()),
@@ -384,7 +419,7 @@ def train_one_epoch(encoder, head, dataset, opt, batch_size, device,
         if not np.isfinite(gn_val) or gn_val > 500.0:
             opt.zero_grad(); continue
         opt.step()
-        epoch_returns.extend(batch_rets.detach().cpu().tolist())
+        epoch_returns.extend(log_rets.detach().cpu().tolist())
     return epoch_returns, grad_norms
 
 
@@ -476,6 +511,11 @@ def train_one_year(cfg: dict, panels: panels_mod.TCNNPanels, year: int, seed: in
     batch_size = tcfg.get("batch_size", 15)
     # Optional winsor z-cap inside the in-training portfolio mapping (None = raw dual-softmax)
     z_cap = tcfg.get("portfolio_z_cap", None)
+    # Loss switch — "sharpe" (default, Moody-Saffell concat-then-Sharpe) or "approx_ndcg" (rung_7+)
+    loss_fn = tcfg.get("loss", "sharpe")
+    loss_k_top = int(tcfg.get("loss_k_top", 50))
+    loss_k_bot = int(tcfg.get("loss_k_bot", 50))
+    loss_temperature = float(tcfg.get("loss_temperature", 10.0))
 
     best_val_ma = -1e9; best_epoch = 0; no_imp = 0
     best_es = {k: v.cpu().clone() for k, v in encoder.state_dict().items()}
@@ -486,7 +526,12 @@ def train_one_year(cfg: dict, panels: panels_mod.TCNNPanels, year: int, seed: in
     _epoch_t0 = _time.time()
     for epoch in range(max_epochs):
         _t_start = _time.time()
-        ep_rets, _ = train_one_epoch(encoder, head, train_ds, opt, batch_size, device, z_cap=z_cap)
+        ep_rets, _ = train_one_epoch(
+            encoder, head, train_ds, opt, batch_size, device,
+            z_cap=z_cap, loss_fn=loss_fn,
+            loss_k_top=loss_k_top, loss_k_bot=loss_k_bot,
+            loss_temperature=loss_temperature,
+        )
         train_sr = (np.mean(ep_rets) / (np.std(ep_rets) + 1e-8) * np.sqrt(252)) if ep_rets else 0.0
         history["train_sharpe"].append(float(train_sr))
 
